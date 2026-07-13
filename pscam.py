@@ -1,5 +1,4 @@
 import threading
-import time
 from itertools import accumulate
 from types import EllipsisType
 from typing import Sequence, TypeAlias, overload
@@ -11,7 +10,7 @@ from cv2.typing import MatLike
 
 class PSCamError(Exception): ...
 
-class PSCam_StereoMatcher():
+class PSCam_Stereo():
     def __init__( self,
         stereo: cv2.StereoMatcher,
         calibration: tuple[ MatLike, MatLike, MatLike, MatLike ],
@@ -43,10 +42,22 @@ class PSCam_StereoMatcher():
             )
         return depth
 
-class PSCAM_VIEW:
+class PSView:
     def __init__(self, frames: Sequence[MatLike], cvt: int | None = None):
         self._cvt = cvt
         self._frames = list(frames)
+
+    @property
+    def raw(self):
+        return PSView( self._frames, None )
+
+    @property
+    def gray(self):
+        return PSView( self._frames, cv2.COLOR_YUV2GRAY_YUYV )
+
+    @property
+    def bgr(self):
+        return PSView( self._frames, cv2.COLOR_YUV2BGR_YUYV )
 
     @staticmethod
     def _check_side(side: int):
@@ -199,7 +210,7 @@ class PSCAM:
         self,
         dev: int,
         mode: int = CAPTURE_MODE_0,
-        stereo: PSCam_StereoMatcher | None = None
+        stereo: PSCam_Stereo | None = None
     ):
         self._uvc = cv2.VideoCapture(dev)
         self._mode = mode
@@ -238,128 +249,19 @@ class PSCAM:
         ]
         return frames
 
-    def _views(self, cvt: int | None = None):
+    @property
+    def view(self):
         frames = self._get_video()
         if not frames:
             raise PSCamError("Couldn't fetch frames from device.")
-        return PSCAM_VIEW(frames, cvt)
-
-    @property
-    def frames_raw(self):
-        return self._views()
-
-    @property
-    def frames_bgr(self):
-        return self._views(cv2.COLOR_YUV2BGR_YUYV)
-
-    @property
-    def frames_gray(self):
-        return self._views(cv2.COLOR_YUV2GRAY_YUYV)
+        return PSView(frames)
 
     @property
     def frame_depth(self):
         if self._stereo:
-            return self._stereo.compute_depth( self.frames_gray[:] )
+            return self._stereo.compute_depth( self.view.gray[:] )
         raise PSCamError( "Stereo matcher was never initialized." )
 
-
-    def _get_corners_calibration(self, raw_frame, size: tuple[int, int]):
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        gray_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
-        ret, corners = cv2.findChessboardCorners(gray_frame, size, None)
-        if ret:
-            corners = cv2.cornerSubPix(
-                gray_frame, corners, (11, 11), (-1, -1), criteria
-            )
-            raw_frame = cv2.drawChessboardCorners(raw_frame, size, corners, ret)
-        return (ret, corners, raw_frame)
-
-    def _get_calibration_data(self, size: tuple[int, int], samples: int = 20):
-        _o = np.zeros((size[0] * size[1], 3), np.float32)
-        _o[:, :2] = np.mgrid[0 : size[0], 0 : size[1]].T.reshape(-1, 2)
-        objp = [_o for _ in range(samples)]
-        imgp_l = []
-        imgp_r = []
-
-        next = time.time() + 1
-        for i in range(samples):
-            while True:
-                frame_l, frame_r = self.frames_gray[:, 0]
-                ret_l, corn_l, frame_l = self._get_corners_calibration(frame_l, size)
-                ret_r, corn_r, frame_r = self._get_corners_calibration(frame_r, size)
-                frame = np.concat((frame_l, frame_r), axis=1)
-                if time.time() >= next and ret_l and ret_r:
-                    imgp_l.append(corn_l)
-                    imgp_r.append(corn_r)
-                    next = time.time() + 1
-                    print(f"Capture #{i + 1}")
-                    break
-                cv2.imshow("Calibrating", frame)
-                cv2.waitKey(10)
-        cv2.destroyAllWindows()
-        return (objp, imgp_l, imgp_r)
-
-    def _get_intrinsics(
-        self, objpoints: Sequence[MatLike], imgpoints: Sequence[MatLike]
-    ):
-        rms, mtx, dist, _, _ = cv2.calibrateCamera(
-            objpoints,
-            imgpoints,
-            (self._w, self._h),
-            None,
-            None,
-        )
-        return (rms, mtx, dist)
-
-    def _get_extrinsics(self, objp: Sequence[MatLike], imgp_l: Sequence[MatLike], imgp_r: Sequence[MatLike]):
-        rms_l, mtx_l, dist_l = self._get_intrinsics(objp, imgp_l)
-        rms_r, mtx_r, dist_r = self._get_intrinsics(objp, imgp_r)
-        print(
-            f"Left rms: {rms_l}. Right rms: {rms_r}. If either reprojection error is above 0.6, we suggest retrying the calibration sequence."
-        )
-
-        flags = cv2.CALIB_FIX_INTRINSIC
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        rms, _, _, _, _, R, T, _, _ = cv2.stereoCalibrate(
-            objp,
-            imgp_l,
-            imgp_r,
-            mtx_l,
-            dist_l,
-            mtx_r,
-            dist_r,
-            (self._w, self._h),
-            criteria = criteria,
-            flags = flags,
-        )
-        print(
-            f"Stereo rms is {rms}. If the reprojection error is above 0.5, we suggest retrying the calibration sequence."
-        )
-        rect_l, rect_r, proj_l, proj_r, _, _, _ = cv2.stereoRectify(
-            mtx_l,
-            dist_l,
-            mtx_r,
-            dist_r,
-            (self._w, self._h),
-            R,
-            T,
-            flags=cv2.CALIB_ZERO_DISPARITY,
-            alpha=0,
-        )
-        map_l_x, map_l_y = cv2.initUndistortRectifyMap(
-            mtx_l, dist_l, rect_l, proj_l, (self._w, self._h), cv2.CV_32FC1
-        )
-        map_r_x, map_r_y = cv2.initUndistortRectifyMap(
-            mtx_r, dist_r, rect_r, proj_r, (self._w, self._h), cv2.CV_32FC1
-        )
-        return (map_l_x, map_l_y, map_r_x, map_r_y)
-
-    def calibrate(
-        self, size: tuple[int, int], samples: int = 20, path="data/calib/stereo.npz"
-    ):
-        objp, imgp_l, imgp_r = self._get_calibration_data(size, samples)
-        map_l_x, map_l_y, map_r_x, map_r_y = self._get_extrinsics(objp, imgp_l, imgp_r)
-
-        np.savez(
-            path, map_l_x=map_l_x, map_l_y=map_l_y, map_r_x=map_r_x, map_r_y=map_r_y
-        )
+    @property
+    def shape(self):
+        return (self._h, self._w)
