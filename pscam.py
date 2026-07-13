@@ -2,92 +2,109 @@ import threading
 import time
 from itertools import accumulate
 from pathlib import Path
-from typing import Sequence, overload, TypeAlias
 from types import EllipsisType
+from typing import Sequence, TypeAlias, overload
 
 import cv2
-from cv2.typing import MatLike
 import numpy as np
+from cv2.typing import MatLike
 
-class VideoError( Exception ):
+
+class VideoError(Exception):
     """Raise when error with fetching video from PS Camera"""
     pass
 
 class PSCAM_VIEW:
-    View: TypeAlias = MatLike | tuple[MatLike, MatLike] | Sequence[MatLike] | Sequence[tuple[MatLike, MatLike]]
-    def __init__( self, frames: Sequence[MatLike], cvt: int | None = None ):
+    def __init__(self, frames: Sequence[MatLike], cvt: int | None = None):
         self._cvt = cvt
-        self._frames = frames
+        self._frames = list(frames)
 
     @staticmethod
-    def _check_side( side: int ):
+    def _check_side(side: int):
         if side < 0 or side > 1:
             raise IndexError("Side must be within 0, 1")
 
     @staticmethod
-    def _check_frame( frame: int ):
+    def _check_frame(frame: int):
         if frame < 0 or frame > 3:
-            raise IndexError( "Frame must be within 0, 3" )
+            raise IndexError("Frame must be within 0, 3")
 
-    Index: TypeAlias = int | slice | None | EllipsisType
-    Key: TypeAlias = Index | tuple[Index, Index]
     @overload
-    def __getitem__( self, key: tuple[int, int] | int ) -> MatLike: ...
+    def __getitem__(self, key: tuple[int, int | None] | int) -> MatLike: ...
     @overload
-    def __getitem__( self, key: tuple[ int, slice ] ) -> Sequence[MatLike]: ...
+    def __getitem__(
+        self, key: tuple[slice | EllipsisType, int | None] | slice | EllipsisType
+    ) -> tuple[MatLike, MatLike]: ...
     @overload
-    def __getitem__( self, key: tuple[ slice, int ] | slice ) -> tuple[ MatLike, MatLike ]: ...
+    def __getitem__(self, key: tuple[int | None, slice | EllipsisType]) -> list[MatLike]: ...
     @overload
-    def __getitem__( self, key: tuple[slice, slice] ) -> Sequence[tuple[MatLike, MatLike]]: ...
-    @overload
-    def __getitem__( self, key: tuple[ int, Index ] ) -> MatLike | Sequence[MatLike]: ...
-    @overload
-    def __getitem__( self, key: tuple[Index, int] | Index ) -> MatLike | Sequence[MatLike]: ...
-    @overload
-    def __getitem__( self, key: tuple[Index, Index] ) -> Sequence[tuple[MatLike, MatLike]]: ...
+    def __getitem__(
+        self, key: tuple[slice | EllipsisType, slice | EllipsisType]
+    ) -> list[tuple[MatLike, MatLike]]: ...
 
-    def __getitem__( self, key: Key ) -> MatLike | tuple[MatLike, MatLike] | Sequence[MatLike] | Sequence[tuple[MatLike, MatLike]]:
-        if not isinstance( key, tuple ):
+    ViewIndex: TypeAlias = int | slice | None | EllipsisType
+    ViewKey: TypeAlias = ViewIndex | tuple[ViewIndex, ViewIndex]
+
+    def __getitem__(
+        self, key: ViewKey
+    ) -> (
+        MatLike
+        | tuple[MatLike, MatLike]
+        | list[MatLike]
+        | list[tuple[MatLike, MatLike]]
+    ):
+        if not isinstance(key, tuple):
             key = (key, None)
         key_side, key_frame = key
 
         if not key_side:
             key_side = 0
-        elif isinstance( key_side, EllipsisType ):
+        elif isinstance(key_side, EllipsisType):
             key_side = slice(None)
-        elif isinstance( key_side, int ):
+        elif isinstance(key_side, int):
             self._check_side(key_side)
 
         if not key_frame:
             key_frame = 0
-        elif isinstance( key_frame, EllipsisType ):
+        elif isinstance(key_frame, EllipsisType):
             key_frame = slice(None)
-        elif isinstance( key_frame, int ):
-            self._check_frame( key_frame )
+        elif isinstance(key_frame, int):
+            self._check_frame(key_frame)
 
-        if isinstance( key_frame, int ) and isinstance( key_side, int ):
-            frame = self._frames[ key_side + key_frame * 2 ]
+        if isinstance(key_frame, int) and isinstance(key_side, int):
+            frame = self._frames[key_side + key_frame * 2]
             if self._cvt:
-                frame = cv2.cvtColor( frame, self._cvt )
+                frame = cv2.cvtColor(frame, self._cvt)
             return frame
-        if isinstance( key_side, slice ) and isinstance( key_frame, slice ):
+        if isinstance(key_side, slice) and isinstance(key_frame, slice):
             m, n, _ = key_side.indices(2)
-            pairs = [ (self._frames[m + i * 2], self._frames[n - 1 + i * 2]) for i in key_frame.indices(4) ]
+            pairs = [
+                (self._frames[m + i * 2], self._frames[n - 1 + i * 2])
+                for i in key_frame.indices(4)
+            ]
             if self._cvt:
-                pairs = [ ( cv2.cvtColor( frame, self._cvt ) for frame in pair ) for pair in pairs ]
+                pairs = [
+                    (cv2.cvtColor(pair[0], self._cvt), cv2.cvtColor(pair[1], self._cvt)[1])
+                    for pair in pairs
+                ]
             return pairs
-        if isinstance( key_side, slice ) and isinstance( key_frame, int ):
+        if isinstance(key_side, slice) and isinstance(key_frame, int):
             m, n, _ = key_side.indices(2)
-            pair = ( self._frames[m + key_frame * 2], self._frames[n - 1 + key_frame * 2] )
+            pair = (
+                self._frames[m + key_frame * 2],
+                self._frames[n - 1 + key_frame * 2],
+            )
             if self._cvt:
-                pair = ( cv2.cvtColor( frame, self._cvt ) for frame in pair )
+                pair = (cv2.cvtColor(pair[0], self._cvt), cv2.cvtColor(pair[1], self._cvt) )
             return pair
-        if isinstance( key_side, int ) and not isinstance( key_frame, int ):
+        if isinstance(key_side, int) and not isinstance(key_frame, int):
             start, stop, step = key_frame.indices(4)
-            frames = self._frames[ key_side + start * 2 : key_side + stop * 2 : step * 2 ]
+            frames = self._frames[key_side + start * 2 : key_side + stop * 2 : step * 2]
             if self._cvt:
-                frames = [ cv2.cvtColor( frame, self._cvt ) for frame in frames ]
+                frames = [cv2.cvtColor(frame, self._cvt) for frame in frames]
             return frames
+        raise KeyError("Invalid key.")
+
 
 class PSCAM:
     CAPTURE_MODE_0 = 0
@@ -111,17 +128,19 @@ class PSCAM:
         }
         return modes.get(mode, (0, 0))
 
-    def _pack_by_mode( self, mode: int ):
-        w = 320 * 2**self._scale_by_mode(mode)
-        return [ w // 4**i for i in range(4) for j in range(2) ][:-1]
+    def _pack_by_mode(self, mode: int):
+        w = 320 * 2 ** self._scale_by_mode(mode)
+        return [w // 4**i for i in range(4) for j in range(2)][:-1]
 
-    def _res_by_mode_all( self, mode: int ):
+    def _res_by_mode_all(self, mode: int):
         scale = self._scale_by_mode(mode)
         w, h = 320 * 2**scale, 200 * 2**scale
-        return [ (w // 4**i, h // 2**i) for i in range(4) for j in range(2) ]
+        return [(w // 4**i, h // 2**i) for i in range(4) for j in range(2)]
 
-    def _rows_size_by_mode( self, mode: int ):
-        return [ self._res_by_mode(mode)[1] // 2**i for i in range(0, 4) for _ in range(2) ]
+    def _rows_size_by_mode(self, mode: int):
+        return [
+            self._res_by_mode(mode)[1] // 2**i for i in range(0, 4) for _ in range(2)
+        ]
 
     def _scale_by_mode(self, mode: int):
         modes = {
@@ -139,11 +158,11 @@ class PSCAM:
         self._uvc.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         self._uvc.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
 
-    def _config_info( self, mode: int ):
+    def _config_info(self, mode: int):
         self._w, self._h = self._res_by_mode(mode)
         self._res_all = self._res_by_mode_all(mode)
         self._buf_w, self._buf_h = self._buf_by_mode(mode)
-        self._pack = list( accumulate( self._HEAD_PACK + self._pack_by_mode(mode) ) )
+        self._pack = list(accumulate(self._HEAD_PACK + self._pack_by_mode(mode)))
         self._rows_size = self._rows_size_by_mode(mode)
         self._rows_inter = (2, 2, 4, 4, 8, 8)
         self._mode = mode
@@ -151,7 +170,7 @@ class PSCAM:
     def _config_stereo(self):
         blockSize = 5
         self._n_disp = 256
-        self.stereo = cv2.StereoSGBM_create(
+        self.stereo = cv2.StereoSGBM.create(
             minDisparity=0,
             numDisparities=self._n_disp,
             blockSize=blockSize,
@@ -178,7 +197,12 @@ class PSCAM:
             print("Couldn't find calibration data.")
             self.calib = False
 
-    def __init__(self, dev: int, mode: int = CAPTURE_MODE_0):
+    def __init__(
+        self, dev: int, mode: int = CAPTURE_MODE_0,
+        stereo: cv2.StereoMatcher | None = None,
+        #Use a NamedTuple?
+        stereo_calib: tuple[ MatLike, MatLike, MatLike, MatLike ] | None = None
+    ):
         self._uvc = cv2.VideoCapture(dev)
         self._config_uvc(mode)
         self._config_info(mode)
@@ -205,18 +229,23 @@ class PSCAM:
             self.stopped = True
             print("Stopped")
             return
-        frames = data.reshape( self._buf_h, self._buf_w, 2 )
+        frames = data.reshape(self._buf_h, self._buf_w, 2)
         if self._mode != PSCAM.CAPTURE_MODE_0:
             frames = frames[:-8]
-        frames = np.hsplit( frames, self._pack )[2:]
-        frames[2:] = [ np.roll( frame.reshape( -1, rows, res[0], 2 ), 1, axis=1 ).reshape( res[1], -1, 2 ) for frame, res, rows in zip( frames[2:], self._res_all[2:], self._rows_inter ) ]
+        frames = np.hsplit(frames, self._pack)[2:]
+        frames[2:] = [
+            np.roll(frame.reshape(-1, rows, res[0], 2), 1, axis=1).reshape(
+                res[1], -1, 2
+            )
+            for frame, res, rows in zip(frames[2:], self._res_all[2:], self._rows_inter)
+        ]
         return frames
 
-    def _views( self, cvt: int | None = None ):
+    def _views(self, cvt: int | None = None):
         frames = self._get_video()
         if not frames:
             raise VideoError("No frames available.")
-        return PSCAM_VIEW( frames, cvt )
+        return PSCAM_VIEW(frames, cvt)
 
     @property
     def frames_raw(self):
@@ -224,15 +253,15 @@ class PSCAM:
 
     @property
     def frames_bgr(self):
-        return self._views( cv2.COLOR_YUV2BGR_YUYV )
+        return self._views(cv2.COLOR_YUV2BGR_YUYV)
 
     @property
     def frames_gray(self):
-        return self._views( cv2.COLOR_YUV2GRAY_YUYV )
+        return self._views(cv2.COLOR_YUV2GRAY_YUYV)
 
     @property
     def frame_depth(self):
-        frame_l, frame_r = self.frames_gray[ :, 0 ]
+        frame_l, frame_r = self.frames_gray[:, 0]
         frame_l = cv2.remap(frame_l, self._map_l_x, self._map_l_y, cv2.INTER_LINEAR)
         frame_r = cv2.remap(frame_r, self._map_r_x, self._map_r_y, cv2.INTER_LINEAR)
         frame = self.stereo.compute(frame_l, frame_r).astype(np.float32) / 16.0
@@ -277,13 +306,19 @@ class PSCAM:
         cv2.destroyAllWindows()
         return (objp, imgp_l, imgp_r)
 
-    def _get_intrinsics(self, objpoints: Sequence[MatLike], imgpoints: Sequence[MatLike]):
+    def _get_intrinsics(
+        self, objpoints: Sequence[MatLike], imgpoints: Sequence[MatLike]
+    ):
         rms, mtx, dist, _, _ = cv2.calibrateCamera(
-            objpoints, imgpoints, (self._w, self._h), None, None,
+            objpoints,
+            imgpoints,
+            (self._w, self._h),
+            None,
+            None,
         )
         return (rms, mtx, dist)
 
-    def _get_extrinsics(self, objp: Sequence[MatLike], imgp_l, imgp_r):
+    def _get_extrinsics(self, objp: Sequence[MatLike], imgp_l: Sequence[MatLike], imgp_r: Sequence[MatLike]):
         rms_l, mtx_l, dist_l = self._get_intrinsics(objp, imgp_l)
         rms_r, mtx_r, dist_r = self._get_intrinsics(objp, imgp_r)
         print(
@@ -301,8 +336,8 @@ class PSCAM:
             mtx_r,
             dist_r,
             (self._w, self._h),
-            criteria,
-            flags,
+            criteria = criteria,
+            flags = flags,
         )
         print(
             f"Stereo rms is {rms}. If the reprojection error is above 0.5, we suggest retrying the calibration sequence."
