@@ -1,7 +1,6 @@
 import threading
 import time
 from itertools import accumulate
-from pathlib import Path
 from types import EllipsisType
 from typing import Sequence, TypeAlias, overload
 
@@ -10,9 +9,39 @@ import numpy as np
 from cv2.typing import MatLike
 
 
-class VideoError(Exception):
-    """Raise when error with fetching video from PS Camera"""
-    pass
+class PSCamError(Exception): ...
+
+class PSCam_StereoMatcher():
+    def __init__( self,
+        stereo: cv2.StereoMatcher,
+        calibration: tuple[ MatLike, MatLike, MatLike, MatLike ],
+        normalize: bool = True,
+        interpolation: int = cv2.INTER_LINEAR,
+        alpha: float = 0,
+        beta: float = 255,
+        norm_type: int = cv2.NORM_MINMAX,
+        dtype: int = cv2.CV_8U,
+        mask: MatLike | None = None
+    ):
+        self._stereo = stereo
+        self._l_x, self._l_y, self._r_x, self._r_y = calibration
+        self._n = normalize
+        self._i = interpolation
+        self._a = alpha
+        self._b = beta
+        self._n_t = norm_type
+        self._dt = dtype
+        self._mask = mask
+
+    def compute_depth( self, view: tuple[MatLike, MatLike] ):
+        frame_l = cv2.remap(view[0], self._l_x, self._l_y, self._i)
+        frame_r = cv2.remap(view[1], self._r_x, self._r_y, self._i)
+        depth = self._stereo.compute(frame_l, frame_r).astype(np.float32) / 16.0
+        if self._n:
+            cv2.normalize(
+                depth, depth, alpha=self._a, beta=self._b, norm_type=self._n_t, dtype=self._dt, mask=self._mask
+            )
+        return depth
 
 class PSCAM_VIEW:
     def __init__(self, frames: Sequence[MatLike], cvt: int | None = None):
@@ -105,7 +134,6 @@ class PSCAM_VIEW:
             return frames
         raise KeyError("Invalid key.")
 
-
 class PSCAM:
     CAPTURE_MODE_0 = 0
     CAPTURE_MODE_1 = 1
@@ -167,48 +195,17 @@ class PSCAM:
         self._rows_inter = (2, 2, 4, 4, 8, 8)
         self._mode = mode
 
-    def _config_stereo(self):
-        blockSize = 5
-        self._n_disp = 256
-        self.stereo = cv2.StereoSGBM.create(
-            minDisparity=0,
-            numDisparities=self._n_disp,
-            blockSize=blockSize,
-            P1=8 * blockSize**2,
-            P2=24 * blockSize**2,
-            disp12MaxDiff=1,
-            uniquenessRatio=5,
-            speckleWindowSize=75,
-            speckleRange=2,
-            preFilterCap=31,
-            mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
-        )
-
-    def load_calib_data(self, path="./data/calib/stereo.npz"):
-        file = Path(path)
-        if file.is_file():
-            data = np.load(path)
-            self._map_l_x = data["map_l_x"]
-            self._map_l_y = data["map_l_y"]
-            self._map_r_x = data["map_r_x"]
-            self._map_r_y = data["map_r_y"]
-            self.calib = True
-        else:
-            print("Couldn't find calibration data.")
-            self.calib = False
-
     def __init__(
-        self, dev: int, mode: int = CAPTURE_MODE_0,
-        stereo: cv2.StereoMatcher | None = None,
-        #Use a NamedTuple?
-        stereo_calib: tuple[ MatLike, MatLike, MatLike, MatLike ] | None = None
+        self,
+        dev: int,
+        mode: int = CAPTURE_MODE_0,
+        stereo: PSCam_StereoMatcher | None = None
     ):
         self._uvc = cv2.VideoCapture(dev)
+        self._mode = mode
+        self._stereo = stereo
         self._config_uvc(mode)
         self._config_info(mode)
-        self.calib = False
-        self.load_calib_data()
-        self._config_stereo()
 
     def start(self):
         self.stopped = False
@@ -244,7 +241,7 @@ class PSCAM:
     def _views(self, cvt: int | None = None):
         frames = self._get_video()
         if not frames:
-            raise VideoError("No frames available.")
+            raise PSCamError("Couldn't fetch frames from device.")
         return PSCAM_VIEW(frames, cvt)
 
     @property
@@ -261,14 +258,10 @@ class PSCAM:
 
     @property
     def frame_depth(self):
-        frame_l, frame_r = self.frames_gray[:, 0]
-        frame_l = cv2.remap(frame_l, self._map_l_x, self._map_l_y, cv2.INTER_LINEAR)
-        frame_r = cv2.remap(frame_r, self._map_r_x, self._map_r_y, cv2.INTER_LINEAR)
-        frame = self.stereo.compute(frame_l, frame_r).astype(np.float32) / 16.0
-        cv2.normalize(
-            frame, frame, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
-        )
-        return frame
+        if self._stereo:
+            return self._stereo.compute_depth( self.frames_gray[:] )
+        raise PSCamError( "Stereo matcher was never initialized." )
+
 
     def _get_corners_calibration(self, raw_frame, size: tuple[int, int]):
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
