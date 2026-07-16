@@ -59,6 +59,9 @@ class PSView:
     def bgr(self):
         return PSView( self._frames, cv2.COLOR_YUV2BGR_YUYV )
 
+    def cvt(self, cvt: int | None):
+        return PSView( self._frames, cvt ) if cvt != self._cvt else self
+
     @staticmethod
     def _check_side(side: int):
         if side < 0 or side > 1:
