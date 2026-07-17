@@ -1,5 +1,5 @@
 import threading
-from itertools import accumulate
+from itertools import accumulate, batched
 from types import EllipsisType
 from typing import Sequence, TypeAlias, overload
 
@@ -164,33 +164,18 @@ class PSCAM:
 
     def _res_by_mode(self, mode: int):
         modes = {
-            PSCAM.CAPTURE_MODE_0: (320, 200),
+            PSCAM.CAPTURE_MODE_0: (320, 192),
             PSCAM.CAPTURE_MODE_1: (640, 400),
             PSCAM.CAPTURE_MODE_2: (1280, 800),
         }
         return modes.get(mode, (0, 0))
 
-    def _pack_by_mode(self, mode: int):
-        w = 320 * 2 ** self._scale_by_mode(mode)
-        return [w // 4**i for i in range(4) for j in range(2)][:-1]
+    def _res_all_by_mode( self, mode: int ):
+        w, h = self._res_by_mode(mode)
+        return [ (h // (2**i), w // (4**i)) for i in range(4) for _ in range(2) ]
 
-    def _res_by_mode_all(self, mode: int):
-        scale = self._scale_by_mode(mode)
-        w, h = 320 * 2**scale, 200 * 2**scale
-        return [(w // 4**i, h // 2**i) for i in range(4) for j in range(2)]
-
-    def _rows_size_by_mode(self, mode: int):
-        return [
-            self._res_by_mode(mode)[1] // 2**i for i in range(0, 4) for _ in range(2)
-        ]
-
-    def _scale_by_mode(self, mode: int):
-        modes = {
-            PSCAM.CAPTURE_MODE_0: 0,
-            PSCAM.CAPTURE_MODE_1: 1,
-            PSCAM.CAPTURE_MODE_2: 2,
-        }
-        return modes.get(mode, 0)
+    def _pack_by_mode( self, mode: int ):
+        return list(accumulate( self._HEAD_PACK + [ w for _, w in self._res_all_by_mode( mode ) ] ))
 
     def _config_uvc(self, mode: int, fps: int = 30):
         self._uvc.set(cv2.CAP_PROP_CONVERT_RGB, 0)
@@ -201,13 +186,11 @@ class PSCAM:
         self._uvc.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
 
     def _config_info(self, mode: int):
-        self._w, self._h = self._res_by_mode(mode)
-        self._res_all = self._res_by_mode_all(mode)
-        self._buf_w, self._buf_h = self._buf_by_mode(mode)
-        self._pack = list(accumulate(self._HEAD_PACK + self._pack_by_mode(mode)))
-        self._rows_size = self._rows_size_by_mode(mode)
-        self._rows_inter = (2, 2, 4, 4, 8, 8)
         self._mode = mode
+        self._w, self._h = self._res_by_mode(mode)
+        self._res_all = self._res_all_by_mode(mode)
+        self._buf_w, self._buf_h = self._buf_by_mode(mode)
+        self._pack = self._pack_by_mode(mode)
 
     def __init__(
         self,
@@ -216,10 +199,8 @@ class PSCAM:
         stereo: PSCam_Stereo | None = None
     ):
         self._uvc = cv2.VideoCapture(dev)
-        self._mode = mode
+        self.mode = mode
         self._stereo = stereo
-        self._config_uvc(mode)
-        self._config_info(mode)
 
     def start(self):
         self.stopped = False
@@ -235,20 +216,23 @@ class PSCAM:
                 self.stopped = True
 
     def _get_video(self):
+
         ret, data = self._uvc.retrieve()
         if not ret:
             self.stopped = True
             print("Stopped")
             return
-        frames = data.reshape(self._buf_h, self._buf_w, 2)
-        if self._mode != PSCAM.CAPTURE_MODE_0:
-            frames = frames[:-8]
-        frames = np.hsplit(frames, self._pack)[2:]
+        frames = np.hsplit(
+            np.roll(
+                data.reshape(self._buf_h, self._buf_w, 2)[:-8],
+                1,
+                axis = 0
+            ),
+            self._pack[:-1]
+        )[2:]
         frames[2:] = [
-            np.roll(frame.reshape(-1, rows, res[0], 2), 1, axis=1).reshape(
-                res[1], -1, 2
-            )
-            for frame, res, rows in zip(frames[2:], self._res_all[2:], self._rows_inter)
+            view.reshape(-1, n, size[1], 2).reshape( size[0], -1, 2 )
+            for view, size, n in zip(frames[2:], self._res_all[2:], (2, 2, 4, 4, 8, 8))
         ]
         return frames
 
@@ -268,3 +252,12 @@ class PSCAM:
     @property
     def shape(self):
         return (self._h, self._w)
+
+    @property
+    def mode( self ):
+        return self._mode
+
+    @mode.setter
+    def mode( self, mode: int ):
+       self._config_info(mode)
+       self._config_uvc(mode)
